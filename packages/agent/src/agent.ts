@@ -111,6 +111,8 @@ export interface AgentOptions {
 	transport?: Transport;
 	maxRetryDelayMs?: number;
 	toolExecution?: ToolExecutionMode;
+	/** Maximum number of parallel tool calls from one assistant message. */
+	maxParallelToolCalls?: number;
 	/** Hard cap on assistant turns within a single run. */
 	maxTurns?: number;
 	/** Optional model router for resolving models per outbound LLM call. */
@@ -196,6 +198,8 @@ export class Agent {
 	public maxRetryDelayMs?: number;
 	/** Tool execution strategy for assistant messages that contain multiple tool calls. */
 	public toolExecution: ToolExecutionMode;
+	/** Maximum number of parallel tool calls from one assistant message. */
+	public maxParallelToolCalls?: number;
 	/** Optional model router for resolving models per outbound LLM call. */
 	public router?: ModelRouter;
 	/** Current role for routing decisions. Required when router is set. */
@@ -221,6 +225,7 @@ export class Agent {
 		this.transport = options.transport ?? "sse";
 		this.maxRetryDelayMs = options.maxRetryDelayMs;
 		this.toolExecution = options.toolExecution ?? "parallel";
+		this.maxParallelToolCalls = options.maxParallelToolCalls;
 		this.router = options.router;
 		this.role = options.role;
 		this.maxTurns = options.maxTurns;
@@ -440,6 +445,7 @@ export class Agent {
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,
 			toolExecution: this.toolExecution,
+			maxParallelToolCalls: this.maxParallelToolCalls,
 			maxTurns: this.maxTurns,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,

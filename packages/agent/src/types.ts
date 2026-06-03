@@ -223,6 +223,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	toolExecution?: ToolExecutionMode;
 
+	/** Maximum number of tool calls from one assistant message to execute at once. Default: 4. */
+	maxParallelToolCalls?: number;
+
 	/**
 	 * Hard cap on assistant turns within a single run. When the cap is reached,
 	 * the loop emits a final assistant message with stopReason "max_turns" and

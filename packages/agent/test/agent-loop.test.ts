@@ -530,6 +530,118 @@ describe("agentLoop with AgentMessage", () => {
 		expect(toolResultIds).toEqual(["tool-1", "tool-2"]);
 	});
 
+	it("should cap parallel tool execution", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		let active = 0;
+		let maxActive = 0;
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				active++;
+				maxActive = Math.max(maxActive, active);
+				await new Promise((resolve) => setTimeout(resolve, 10));
+				active--;
+				return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			toolExecution: "parallel",
+			maxParallelToolCalls: 2,
+		};
+		let callIndex = 0;
+		const stream = agentLoop([createUserMessage("echo")], context, config, undefined, () => {
+			const mockStream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex === 0) {
+					mockStream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							["a", "b", "c"].map((value) => ({
+								type: "toolCall" as const,
+								id: `tool-${value}`,
+								name: "echo",
+								arguments: { value },
+							})),
+							"toolUse",
+						),
+					});
+				} else {
+					mockStream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				}
+				callIndex++;
+			});
+			return mockStream;
+		});
+
+		for await (const _event of stream) {
+			// consume
+		}
+
+		expect(maxActive).toBe(2);
+	});
+
+	it("should coalesce rapid tool updates", async () => {
+		const toolSchema = Type.Object({});
+		const tool: AgentTool<typeof toolSchema, { value: number }> = {
+			name: "ticker",
+			label: "Ticker",
+			description: "Ticker tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, _params, _signal, onUpdate) {
+				for (let i = 0; i < 5; i++) {
+					onUpdate?.({ content: [{ type: "text", text: String(i) }], details: { value: i } });
+				}
+				return { content: [{ type: "text", text: "done" }], details: { value: 5 } };
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+		let callIndex = 0;
+		const stream = agentLoop([createUserMessage("tick")], context, config, undefined, () => {
+			const mockStream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex === 0) {
+					mockStream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[{ type: "toolCall", id: "tool-1", name: "ticker", arguments: {} }],
+							"toolUse",
+						),
+					});
+				} else {
+					mockStream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				}
+				callIndex++;
+			});
+			return mockStream;
+		});
+
+		const updates: AgentEvent[] = [];
+		for await (const event of stream) {
+			if (event.type === "tool_execution_update") updates.push(event);
+		}
+
+		expect(updates).toHaveLength(1);
+		expect(updates[0]).toMatchObject({ partialResult: { details: { value: 4 } } });
+	});
+
 	it("should inject queued messages after all tool calls complete", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const executed: string[] = [];

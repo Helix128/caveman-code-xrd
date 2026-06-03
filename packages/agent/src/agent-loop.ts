@@ -24,6 +24,9 @@ import type {
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
+const DEFAULT_MAX_PARALLEL_TOOL_CALLS = 4;
+const TOOL_UPDATE_INTERVAL_MS = 100;
+
 /**
  * Start an agent loop with a new prompt message.
  * The prompt is added to the context and events are emitted for it.
@@ -450,19 +453,19 @@ async function executeToolCallsParallel(
 		}
 	}
 
-	const runningCalls = runnableCalls.map((prepared) => ({
-		prepared,
-		execution: executePreparedToolCall(prepared, signal, emit),
-	}));
+	const maxParallel = Math.max(1, Math.floor(config.maxParallelToolCalls ?? DEFAULT_MAX_PARALLEL_TOOL_CALLS));
+	const executedCalls = await mapWithLimit(runnableCalls, maxParallel, async (prepared) => {
+		const executed = await executePreparedToolCall(prepared, signal, emit);
+		return { prepared, executed };
+	});
 
-	for (const running of runningCalls) {
-		const executed = await running.execution;
+	for (const running of executedCalls) {
 		results.push(
 			await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
 				running.prepared,
-				executed,
+				running.executed,
 				config,
 				signal,
 				emit,
@@ -562,36 +565,90 @@ async function executePreparedToolCall(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallOutcome> {
-	const updateEvents: Promise<void>[] = [];
+	const updateEmitter = createToolUpdateEmitter(prepared, emit);
 
 	try {
 		const result = await prepared.tool.execute(
 			prepared.toolCall.id,
 			prepared.args as never,
 			signal,
-			(partialResult) => {
-				updateEvents.push(
-					Promise.resolve(
-						emit({
-							type: "tool_execution_update",
-							toolCallId: prepared.toolCall.id,
-							toolName: prepared.toolCall.name,
-							args: prepared.toolCall.arguments,
-							partialResult,
-						}),
-					),
-				);
-			},
+			(partialResult) => updateEmitter.schedule(partialResult),
 		);
-		await Promise.all(updateEvents);
+		await updateEmitter.drain();
 		return { result, isError: false };
 	} catch (error) {
-		await Promise.all(updateEvents);
+		await updateEmitter.drain();
 		return {
 			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
 			isError: true,
 		};
 	}
+}
+
+function createToolUpdateEmitter(
+	prepared: PreparedToolCall,
+	emit: AgentEventSink,
+): {
+	schedule(partialResult: AgentToolResult<unknown>): void;
+	drain(): Promise<void>;
+} {
+	let pendingResult: AgentToolResult<unknown> | undefined;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	let lastEmitAt = 0;
+	let chain = Promise.resolve();
+
+	const emitPending = () => {
+		if (timer) {
+			clearTimeout(timer);
+			timer = undefined;
+		}
+		const partialResult = pendingResult;
+		if (!partialResult) return;
+		pendingResult = undefined;
+		lastEmitAt = Date.now();
+		chain = chain.then(() =>
+			Promise.resolve(
+				emit({
+					type: "tool_execution_update",
+					toolCallId: prepared.toolCall.id,
+					toolName: prepared.toolCall.name,
+					args: prepared.toolCall.arguments,
+					partialResult,
+				}),
+			),
+		);
+	};
+
+	return {
+		schedule(partialResult) {
+			pendingResult = partialResult;
+			if (timer) return;
+			const elapsed = Date.now() - lastEmitAt;
+			const delay = Math.max(0, TOOL_UPDATE_INTERVAL_MS - elapsed);
+			timer = setTimeout(emitPending, delay);
+		},
+		async drain() {
+			emitPending();
+			await chain;
+		},
+	};
+}
+
+async function mapWithLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+	if (items.length === 0) return [];
+	const results = new Array<R>(items.length);
+	let nextIndex = 0;
+	const workerCount = Math.max(1, Math.min(limit, items.length));
+	const workers = Array.from({ length: workerCount }, async () => {
+		while (true) {
+			const index = nextIndex;
+			nextIndex += 1;
+			if (index >= items.length) return;
+			results[index] = await fn(items[index]);
+		}
+	});
+	await Promise.all(workers);
+	return results;
 }
 
 async function finalizeExecutedToolCall(
