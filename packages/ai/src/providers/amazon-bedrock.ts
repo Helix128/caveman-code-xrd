@@ -104,14 +104,14 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 			// resovle it from aws profile configs. Otherwise fall back to us-east-1.
 			const explicitRegion = options.region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
 			if (explicitRegion) {
-				config.region = explicitRegion;
+				(config as unknown as Record<string, unknown>).region = explicitRegion;
 			} else if (!process.env.AWS_PROFILE) {
-				config.region = "us-east-1";
+				(config as unknown as Record<string, unknown>).region = "us-east-1";
 			}
 
 			// Support proxies that don't need authentication
 			if (process.env.AWS_BEDROCK_SKIP_AUTH === "1") {
-				config.credentials = {
+				(config as unknown as Record<string, unknown>).credentials = {
 					accessKeyId: "dummy-access-key",
 					secretAccessKey: "dummy-secret-key",
 				};
@@ -133,19 +133,19 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 				// Bedrock runtime uses NodeHttp2Handler by default since v3.798.0, which is based
 				// on `http2` module and has no support for http agent.
 				// Use NodeHttpHandler to support http agent.
-				config.requestHandler = new nodeHttpHandler.NodeHttpHandler({
+				(config as unknown as Record<string, unknown>).requestHandler = new nodeHttpHandler.NodeHttpHandler({
 					httpAgent: agent,
 					httpsAgent: agent,
 				});
 			} else if (process.env.AWS_BEDROCK_FORCE_HTTP1 === "1") {
 				// Some custom endpoints require HTTP/1.1 instead of HTTP/2
 				const nodeHttpHandler = await import("@smithy/node-http-handler");
-				config.requestHandler = new nodeHttpHandler.NodeHttpHandler();
+				(config as unknown as Record<string, unknown>).requestHandler = new nodeHttpHandler.NodeHttpHandler();
 			}
 		} else {
 			// Non-Node environment (browser): fall back to us-east-1 since
 			// there's no config file resolution available.
-			config.region = options.region || "us-east-1";
+			(config as unknown as Record<string, unknown>).region = options.region || "us-east-1";
 		}
 
 		try {
