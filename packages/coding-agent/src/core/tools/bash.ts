@@ -156,6 +156,7 @@ export interface BashToolOptions {
 }
 
 const BASH_PREVIEW_LINES = 5;
+const BASH_UPDATE_INTERVAL_MS = 125;
 
 type BashRenderState = {
 	startedAt: number | undefined;
@@ -304,12 +305,49 @@ export function createBashToolDefinition(
 				const chunks: Buffer[] = [];
 				let chunksBytes = 0;
 				const maxChunksBytes = DEFAULT_MAX_BYTES * 2;
+				let updateTimer: ReturnType<typeof setTimeout> | undefined;
+				let updatePending = false;
 
 				const ensureTempFile = () => {
 					if (tempFilePath) return;
 					tempFilePath = getTempFilePath();
 					tempFileStream = createWriteStream(tempFilePath);
 					for (const chunk of chunks) tempFileStream.write(chunk);
+				};
+
+				const emitPartialUpdate = () => {
+					if (!onUpdate || !updatePending) return;
+					updatePending = false;
+					const fullText = Buffer.concat(chunks, chunksBytes).toString("utf-8");
+					const truncation = truncateTail(fullText);
+					if (truncation.truncated) {
+						ensureTempFile();
+					}
+					onUpdate({
+						content: [{ type: "text", text: truncation.content || "" }],
+						details: {
+							truncation: truncation.truncated ? truncation : undefined,
+							fullOutputPath: tempFilePath,
+						},
+					});
+				};
+
+				const schedulePartialUpdate = () => {
+					if (!onUpdate) return;
+					updatePending = true;
+					if (updateTimer) return;
+					updateTimer = setTimeout(() => {
+						updateTimer = undefined;
+						emitPartialUpdate();
+					}, BASH_UPDATE_INTERVAL_MS);
+				};
+
+				const flushPartialUpdate = () => {
+					if (updateTimer) {
+						clearTimeout(updateTimer);
+						updateTimer = undefined;
+					}
+					emitPartialUpdate();
 				};
 
 				const handleData = (data: Buffer) => {
@@ -328,22 +366,7 @@ export function createBashToolDefinition(
 						const removed = chunks.shift()!;
 						chunksBytes -= removed.length;
 					}
-					// Stream partial output using the rolling tail buffer.
-					if (onUpdate) {
-						const fullBuffer = Buffer.concat(chunks);
-						const fullText = fullBuffer.toString("utf-8");
-						const truncation = truncateTail(fullText);
-						if (truncation.truncated) {
-							ensureTempFile();
-						}
-						onUpdate({
-							content: [{ type: "text", text: truncation.content || "" }],
-							details: {
-								truncation: truncation.truncated ? truncation : undefined,
-								fullOutputPath: tempFilePath,
-							},
-						});
-					}
+					schedulePartialUpdate();
 				};
 
 				ops.exec(spawnContext.command, spawnContext.cwd, {
@@ -353,6 +376,7 @@ export function createBashToolDefinition(
 					env: spawnContext.env,
 				})
 					.then(({ exitCode }) => {
+						flushPartialUpdate();
 						// Combine the rolling buffer chunks.
 						const fullBuffer = Buffer.concat(chunks);
 						const fullOutput = fullBuffer.toString("utf-8");
@@ -388,6 +412,7 @@ export function createBashToolDefinition(
 						}
 					})
 					.catch((err: Error) => {
+						flushPartialUpdate();
 						// Close temp file stream and include buffered output in the error message.
 						if (tempFileStream) tempFileStream.end();
 						const fullBuffer = Buffer.concat(chunks);

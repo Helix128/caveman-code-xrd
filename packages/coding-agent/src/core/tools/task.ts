@@ -30,6 +30,7 @@ import {
 } from "@juliusbrussee/caveman-agent";
 import { Text } from "@juliusbrussee/caveman-tui";
 import { type Static, Type } from "@sinclair/typebox";
+import { killProcessTree } from "../../utils/shell.js";
 import {
 	filterAgentsByMcpAvailability,
 	findAgentDef,
@@ -46,6 +47,12 @@ import {
 } from "../subagent-registry.js";
 
 const MAX_CONCURRENCY = 4;
+const MAX_SUBAGENT_CAPTURE_CHARS = 1024 * 1024;
+
+function appendBounded(current: string, chunk: string): string {
+	const next = current + chunk;
+	return next.length > MAX_SUBAGENT_CAPTURE_CHARS ? next.slice(-MAX_SUBAGENT_CAPTURE_CHARS) : next;
+}
 
 /**
  * Hard cap on subagent recursion depth. Tracked via the `CAVE_SUBAGENT_DEPTH`
@@ -253,6 +260,7 @@ async function spawnSubagent(opts: SpawnOptions): Promise<SpawnResult> {
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],
 			env: childEnv,
+			detached: process.platform !== "win32",
 		});
 		let buf = "";
 		const subagentId = opts.subagentId ?? opts.agent.name;
@@ -290,39 +298,39 @@ async function spawnSubagent(opts: SpawnOptions): Promise<SpawnResult> {
 		};
 		child.stdout?.on("data", (chunk: Buffer) => {
 			const s = chunk.toString("utf-8");
-			stdout += s;
+			stdout = appendBounded(stdout, s);
 			buf += s;
 			const lines = buf.split("\n");
 			buf = lines.pop() ?? "";
 			for (const ln of lines) flushLine(ln);
 		});
 		child.stderr?.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString("utf-8");
+			stderr = appendBounded(stderr, chunk.toString("utf-8"));
 		});
+		let killTimer: ReturnType<typeof setTimeout> | undefined;
+		const kill = () => {
+			if (child.pid) killProcessTree(child.pid);
+			killTimer = setTimeout(() => {
+				if (child.pid) killProcessTree(child.pid);
+			}, 5000);
+			killTimer.unref?.();
+		};
+		const cleanup = () => {
+			if (killTimer) clearTimeout(killTimer);
+			opts.signal?.removeEventListener("abort", kill);
+		};
 		child.on("close", (code: number | null) => {
+			cleanup();
 			if (buf.trim()) flushLine(buf);
 			emitProgress(code === 0 || code === null ? "completed" : "failed", `exit ${code ?? 0}`);
 			resolve(code ?? 0);
 		});
 		child.on("error", () => {
+			cleanup();
 			emitProgress("failed", "spawn error");
 			resolve(1);
 		});
 		if (opts.signal) {
-			const kill = () => {
-				try {
-					child.kill("SIGTERM");
-				} catch {
-					/* ignore */
-				}
-				setTimeout(() => {
-					try {
-						if (!child.killed) child.kill("SIGKILL");
-					} catch {
-						/* ignore */
-					}
-				}, 5000);
-			};
 			if (opts.signal.aborted) kill();
 			else opts.signal.addEventListener("abort", kill, { once: true });
 		}
