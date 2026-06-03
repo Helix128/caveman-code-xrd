@@ -127,6 +127,7 @@ export class CheckpointManager {
 	private async takeSnapshot(reason: SnapshotReason, sessionId: string): Promise<SnapshotResult> {
 		const release = await acquireLock(this.lockFile);
 		try {
+			await new Promise<void>((resolve) => setImmediate(resolve));
 			const result = await this.snapshotter.snapshot(reason, sessionId);
 			this.index.push({
 				ts: new Date().toISOString(),
