@@ -9,10 +9,10 @@
  * Reference: claude-code components/QuickOpenDialog.tsx (243L).
  */
 
-import { execSync } from "node:child_process";
-import { readdirSync, statSync } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { Container, Spacer, Text, type TUI } from "@juliusbrussee/caveman-tui";
+import { gitOutput } from "../../../utils/git-process.js";
 import { theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
 import { rawKeyHint } from "./keybinding-hints.js";
@@ -29,31 +29,23 @@ export interface QuickOpenResult {
 	relativePath: string;
 }
 
-function listGitFiles(cwd: string): string[] | null {
-	try {
-		const out = execSync("git ls-files --cached --others --exclude-standard", {
-			cwd,
-			stdio: ["ignore", "pipe", "ignore"],
-			timeout: 2000,
-			maxBuffer: 1024 * 1024 * 4,
-		})
-			.toString("utf-8")
-			.split("\n")
-			.filter(Boolean);
-		return out;
-	} catch {
-		return null;
-	}
+async function listGitFiles(cwd: string): Promise<string[] | null> {
+	const output = await gitOutput(["ls-files", "--cached", "--others", "--exclude-standard"], {
+		cwd,
+		timeoutMs: 2000,
+		maxBuffer: 1024 * 1024 * 4,
+	});
+	return output ? output.split("\n").filter(Boolean) : null;
 }
 
-function walkFs(cwd: string, limit: number): string[] {
+async function walkFs(cwd: string, limit: number): Promise<string[]> {
 	const out: string[] = [];
 	const stack: string[] = [cwd];
 	while (stack.length > 0 && out.length < limit) {
 		const dir = stack.pop()!;
 		let entries: string[];
 		try {
-			entries = readdirSync(dir);
+			entries = await readdir(dir);
 		} catch {
 			continue;
 		}
@@ -61,9 +53,9 @@ function walkFs(cwd: string, limit: number): string[] {
 			if (out.length >= limit) break;
 			if (SKIP_DIRS.has(entry)) continue;
 			const full = join(dir, entry);
-			let s: ReturnType<typeof statSync>;
+			let s: Awaited<ReturnType<typeof stat>>;
 			try {
-				s = statSync(full);
+				s = await stat(full);
 			} catch {
 				continue;
 			}
@@ -99,9 +91,10 @@ function fuzzyScore(query: string, target: string): number | null {
 }
 
 export class QuickOpenComponent extends Container {
-	private files: string[];
-	private filtered: string[];
+	private files: string[] = [];
+	private filtered: string[] = [];
 	private query = "";
+	private loading = true;
 	private selectedIndex = 0;
 	private listContainer: Container;
 	private titleText: Text;
@@ -121,13 +114,11 @@ export class QuickOpenComponent extends Container {
 		this.onCancelCallback = onCancel;
 
 		const limit = opts?.limit ?? MAX_FILES;
-		this.files = listGitFiles(cwd) ?? walkFs(cwd, limit);
-		this.filtered = this.files.slice(0, this.maxVisible);
 
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
 
-		this.titleText = new Text(theme.fg("accent", `Quick open — ${this.files.length} files`), 1, 0);
+		this.titleText = new Text(theme.fg("accent", "Quick open — loading files…"), 1, 0);
 		this.addChild(this.titleText);
 		this.addChild(new Spacer(1));
 
@@ -143,10 +134,23 @@ export class QuickOpenComponent extends Container {
 		this.addChild(new Text(theme.fg("dim", hints), 1, 0));
 
 		this.refreshList();
+		void this.loadFiles(cwd, limit, opts?.tui);
+	}
+
+	private async loadFiles(cwd: string, limit: number, tui: TUI | undefined): Promise<void> {
+		this.files = (await listGitFiles(cwd)) ?? (await walkFs(cwd, limit));
+		this.loading = false;
+		this.titleText.setText(theme.fg("accent", `Quick open — ${this.files.length} files`));
+		this.applyFilter();
+		tui?.requestRender();
 	}
 
 	private refreshList(): void {
 		this.listContainer.clear();
+		if (this.loading) {
+			this.listContainer.addChild(new Text(theme.fg("dim", "  Loading…"), 1, 0));
+			return;
+		}
 		const visible = this.filtered.slice(0, this.maxVisible);
 		for (let i = 0; i < visible.length; i++) {
 			const path = visible[i];
