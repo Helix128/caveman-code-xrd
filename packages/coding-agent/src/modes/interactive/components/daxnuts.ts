@@ -59,7 +59,7 @@ export class DaxnutsComponent implements Component {
 	private image: string[];
 	private interval: ReturnType<typeof setInterval> | null = null;
 	private tick = 0;
-	private maxTicks = 25; // ~2 seconds at 80ms
+	private maxTicks = 18; // ~2 seconds at 120ms
 	private cachedLines: string[] = [];
 	private cachedWidth = 0;
 	private cachedTick = -1;
@@ -82,7 +82,7 @@ export class DaxnutsComponent implements Component {
 			}
 			this.cachedWidth = 0;
 			this.ui.requestRender();
-		}, 80);
+		}, 120);
 	}
 
 	private stopAnimation(): void {

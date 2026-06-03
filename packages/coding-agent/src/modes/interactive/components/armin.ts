@@ -178,7 +178,7 @@ export class ArminComponent implements Component {
 	}
 
 	private startAnimation(): void {
-		const fps = this.effect === "glitch" ? 60 : 30;
+		const fps = this.effect === "glitch" ? 30 : 20;
 		this.interval = setInterval(() => {
 			const done = this.tickEffect();
 			this.updateDisplay();

@@ -56,10 +56,13 @@ export class Spinner extends Text {
 	start(): void {
 		if (this.intervalId) return;
 		this.updateDisplay();
-		this.intervalId = setInterval(() => {
-			this.currentFrame = (this.currentFrame + 1) % this.spinner.frames.length;
-			this.updateDisplay();
-		}, this.spinner.interval);
+		this.intervalId = setInterval(
+			() => {
+				this.currentFrame = (this.currentFrame + 1) % this.spinner.frames.length;
+				this.updateDisplay();
+			},
+			Math.max(this.spinner.interval, 100),
+		);
 	}
 
 	stop(): void {

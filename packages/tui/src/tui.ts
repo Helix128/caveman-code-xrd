@@ -7,7 +7,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
 import { isKeyRelease, matchesKey } from "./keys.js";
+import { classifySyncOutputSupport, type SyncOutputSupport, wrapSyncOutput } from "./sync-output.js";
 import type { Terminal } from "./terminal.js";
+import { detectTerminalIdentity } from "./terminal-detect.js";
 import { getCapabilities, isImageLine, setCellDimensions } from "./terminal-image.js";
 import { applyBackgroundToLine, extractSegments, sliceByColumn, sliceWithWidth, visibleWidth } from "./utils.js";
 
@@ -128,6 +130,11 @@ function parseSizeValue(value: SizeValue | undefined, referenceSize: number): nu
 
 function isTermuxSession(): boolean {
 	return Boolean(process.env.TERMUX_VERSION);
+}
+
+function getSyncOutputOverride(): "on" | "off" | "auto" {
+	const value = process.env.CAVE_SYNC_OUTPUT;
+	return value === "on" || value === "off" || value === "auto" ? value : "auto";
 }
 
 /**
@@ -251,6 +258,10 @@ export class TUI extends Container {
 	private previousViewportTop = 0; // Track previous viewport top for resize-aware cursor moves
 	private fullRedrawCount = 0;
 	private stopped = false;
+	private readonly syncOutputSupport: SyncOutputSupport = classifySyncOutputSupport({
+		identity: detectTerminalIdentity(),
+		override: getSyncOutputOverride(),
+	});
 	private globalBgFn: ((text: string) => string) | null = null;
 	private bottomPinnedChildren = 0;
 
@@ -554,7 +565,7 @@ export class TUI extends Container {
 				this.renderTimer = undefined;
 			}
 			this.renderRequested = true;
-			process.nextTick(() => {
+			setImmediate(() => {
 				if (this.stopped || !this.renderRequested) {
 					return;
 				}
@@ -566,7 +577,7 @@ export class TUI extends Container {
 		}
 		if (this.renderRequested) return;
 		this.renderRequested = true;
-		process.nextTick(() => this.scheduleRender());
+		setImmediate(() => this.scheduleRender());
 	}
 
 	private scheduleRender(): void {
@@ -933,10 +944,26 @@ export class TUI extends Container {
 			const line = lines[i];
 			if (!isImageLine(line)) {
 				const processedLine = this.globalBgFn ? applyBackgroundToLine(line, width, this.globalBgFn) : line;
-				lines[i] = processedLine + reset;
+				lines[i] = this.fitLineToWidth(processedLine + reset, width);
 			}
 		}
 		return lines;
+	}
+
+	private fitLineToWidth(line: string, width: number): string {
+		if (isImageLine(line) || width <= 0) return line;
+		return visibleWidth(line) > width ? sliceByColumn(line, 0, width, true) : line;
+	}
+
+	private fitLinesToWidth(lines: string[], width: number): string[] {
+		for (let i = 0; i < lines.length; i++) {
+			lines[i] = this.fitLineToWidth(lines[i], width);
+		}
+		return lines;
+	}
+
+	private wrapFrame(buffer: string): string {
+		return wrapSyncOutput(buffer, this.syncOutputSupport);
 	}
 
 	/** Splice overlay content into a base line at a specific column. Single-pass optimized. */
@@ -1047,14 +1074,13 @@ export class TUI extends Container {
 
 		// Degenerate-size placeholder — never crash, never write outside bounds.
 		if (height < TUI.MIN_ROWS || width < TUI.MIN_COLS) {
-			const frame = this.renderDegenerateFrame(width, height);
-			let buffer = "\x1b[?2026h\x1b[2J\x1b[H";
+			const frame = this.fitLinesToWidth(this.renderDegenerateFrame(width, height), width);
+			let buffer = "\x1b[2J\x1b[H";
 			for (let i = 0; i < frame.length; i++) {
 				if (i > 0) buffer += "\r\n";
 				buffer += frame[i];
 			}
-			buffer += "\x1b[?2026l";
-			this.terminal.write(buffer);
+			this.terminal.write(this.wrapFrame(buffer));
 			this.previousLines = frame;
 			this.previousWidth = width;
 			this.previousHeight = height;
@@ -1094,23 +1120,26 @@ export class TUI extends Container {
 
 		// Pad to fill terminal height when global background is active
 		if (this.globalBgFn && newLines.length < height) {
-			const emptyBgLine = applyBackgroundToLine("", width, this.globalBgFn) + TUI.SEGMENT_RESET;
+			const emptyBgLine = this.fitLineToWidth(
+				applyBackgroundToLine("", width, this.globalBgFn) + TUI.SEGMENT_RESET,
+				width,
+			);
 			while (newLines.length < height) {
 				newLines.push(emptyBgLine);
 			}
 		}
+		this.fitLinesToWidth(newLines, width);
 
 		// Helper to clear scrollback and viewport and render all new lines
 		const fullRender = (clear: boolean): void => {
 			this.fullRedrawCount += 1;
-			let buffer = "\x1b[?2026h"; // Begin synchronized output
+			let buffer = "";
 			if (clear) buffer += "\x1b[2J\x1b[H\x1b[3J"; // Clear screen, home, then clear scrollback
 			for (let i = 0; i < newLines.length; i++) {
 				if (i > 0) buffer += "\r\n";
 				buffer += newLines[i];
 			}
-			buffer += "\x1b[?2026l"; // End synchronized output
-			this.terminal.write(buffer);
+			this.terminal.write(this.wrapFrame(buffer));
 			this.cursorRow = Math.max(0, newLines.length - 1);
 			this.hardwareCursorRow = this.cursorRow;
 			// Reset max lines when clearing, otherwise track growth
@@ -1202,7 +1231,7 @@ export class TUI extends Container {
 		// All changes are in deleted lines (nothing to render, just clear)
 		if (firstChanged >= newLines.length) {
 			if (this.previousLines.length > newLines.length) {
-				let buffer = "\x1b[?2026h";
+				let buffer = "";
 				// Move to end of new content (clamp to 0 for empty content)
 				const targetRow = Math.max(0, newLines.length - 1);
 				if (targetRow < prevViewportTop) {
@@ -1231,8 +1260,7 @@ export class TUI extends Container {
 				if (extraLines > 0) {
 					buffer += `\x1b[${extraLines}A`;
 				}
-				buffer += "\x1b[?2026l";
-				this.terminal.write(buffer);
+				this.terminal.write(this.wrapFrame(buffer));
 				this.cursorRow = targetRow;
 				this.hardwareCursorRow = targetRow;
 			}
@@ -1253,8 +1281,7 @@ export class TUI extends Container {
 		}
 
 		// Render from first changed line to end
-		// Build buffer with all updates wrapped in synchronized output
-		let buffer = "\x1b[?2026h"; // Begin synchronized output
+		let buffer = "";
 		const prevViewportBottom = prevViewportTop + height - 1;
 		const moveTargetRow = appendStart ? firstChanged - 1 : firstChanged;
 		if (moveTargetRow > prevViewportBottom) {
@@ -1286,36 +1313,7 @@ export class TUI extends Container {
 		for (let i = firstChanged; i <= renderEnd; i++) {
 			if (i > firstChanged) buffer += "\r\n";
 			buffer += "\x1b[2K"; // Clear current line
-			const line = newLines[i];
-			const isImage = isImageLine(line);
-			if (!isImage && visibleWidth(line) > width) {
-				// Log all lines to crash file for debugging
-				const crashLogPath = path.join(os.homedir(), ".pi", "agent", "pi-crash.log");
-				const crashData = [
-					`Crash at ${new Date().toISOString()}`,
-					`Terminal width: ${width}`,
-					`Line ${i} visible width: ${visibleWidth(line)}`,
-					"",
-					"=== All rendered lines ===",
-					...newLines.map((l, idx) => `[${idx}] (w=${visibleWidth(l)}) ${l}`),
-					"",
-				].join("\n");
-				fs.mkdirSync(path.dirname(crashLogPath), { recursive: true });
-				fs.writeFileSync(crashLogPath, crashData);
-
-				// Clean up terminal state before throwing
-				this.stop();
-
-				const errorMsg = [
-					`Rendered line ${i} exceeds terminal width (${visibleWidth(line)} > ${width}).`,
-					"",
-					"This is likely caused by a custom TUI component not truncating its output.",
-					"Use visibleWidth() to measure and truncateToWidth() to truncate lines.",
-					"",
-					`Debug log written to: ${crashLogPath}`,
-				].join("\n");
-				throw new Error(errorMsg);
-			}
+			const line = this.fitLineToWidth(newLines[i], width);
 			buffer += line;
 		}
 
@@ -1337,8 +1335,6 @@ export class TUI extends Container {
 			// Move cursor back to end of new content
 			buffer += `\x1b[${extraLines}A`;
 		}
-
-		buffer += "\x1b[?2026l"; // End synchronized output
 
 		if (process.env.PI_TUI_DEBUG === "1") {
 			const debugDir = "/tmp/tui";
@@ -1370,7 +1366,7 @@ export class TUI extends Container {
 		}
 
 		// Write entire buffer at once
-		this.terminal.write(buffer);
+		this.terminal.write(this.wrapFrame(buffer));
 
 		// Track cursor position for next render
 		// cursorRow tracks end of content (for viewport calculation)
