@@ -9,7 +9,7 @@
 			"@juliusbrussee/caveman-agent": ["../../agent/dist/index.d.ts"],
 			"@juliusbrussee/caveman-ai": ["../../ai/dist/index.d.ts"],
 			"@juliusbrussee/caveman-tui": ["../../tui/dist/index.d.ts"],
-			"@juliusbrussee/caveman-web-ui": ["../dist/index.d.ts"]
+			"@juliusbrussee/caveman-web-ui": ["../src/index.ts"]
 		},
 		"strict": true,
 		"skipLibCheck": true,
